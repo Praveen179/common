@@ -1,0 +1,15 @@
+####jdk and maven combined package base image used, stage one is building the image, stage copying and running the image
+
+FROM maven:3.9-eclipse-temurin-8 AS build
+RUN mkdir /app
+WORKDIR /app
+COPY . .
+RUN mvn clean package
+
+
+FROM  eclipse-temurin:8u502-b07-jre-ubi10-minimal
+RUN mkdir -p /app
+COPY --from=0 /app/target/*.jar /app/spring-boot-mongo.jar
+WORKDIR /app
+EXPOSE 8080
+CMD ["java", "-jar", "spring-boot-mongo.jar"]
