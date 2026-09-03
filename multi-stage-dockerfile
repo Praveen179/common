@@ -1,5 +1,6 @@
-####jdk and maven combined package base image used, stage one is building the image, stage copying and running the image
-
+------------------------
+Multi stage Dockerfile
+------------------------
 FROM maven:3.9-eclipse-temurin-8 AS build
 RUN mkdir /app
 WORKDIR /app
@@ -7,9 +8,426 @@ COPY . .
 RUN mvn clean package
 
 
-FROM  eclipse-temurin:8u502-b07-jre-ubi10-minimal
+FROM  eclipse-temurin:8u502-b07-jre-ubi10-minimal #==> You can also use JDK base image as runtime
 RUN mkdir -p /app
-COPY --from=0 /app/target/*.jar /app/spring-boot-mongo.jar
+COPY --from=build /app/target/*.jar /app/spring-boot-mongo.jar
 WORKDIR /app
 EXPOSE 8080
 CMD ["java", "-jar", "spring-boot-mongo.jar"]
+
+------------------------
+Single stage Dockerfile
+------------------------
+FROM maven:3.9-eclipse-temurin-8
+
+WORKDIR /app
+
+COPY . .
+
+RUN mvn clean package
+
+EXPOSE 8080
+
+CMD ["java", "-jar", "target/spring-boot-mongo.jar"]
+
+
+
+####################### Description ############################
+
+Yes. For a README, I would make it **simple, practical, and in your own note-taking style**, rather than sounding like documentation from Docker.
+
+You can paste the following directly into your README:
+
+# Docker Multi-Stage Build – Spring Boot Application
+
+## 1. Single-Stage Dockerfile
+
+A simple way to Dockerize a Spring Boot application is to use the Maven image itself:
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-8
+
+WORKDIR /app
+
+COPY . .
+
+RUN mvn clean package
+
+EXPOSE 8080
+
+CMD ["java", "-jar", "target/spring-boot-mongo.jar"]
+```
+
+Here the same image is used for both **building and running** the application.
+
+The Maven image contains:
+
+* Maven
+* JDK
+* Java runtime
+
+So it can execute:
+
+```bash
+mvn clean package
+```
+
+and later:
+
+```bash
+java -jar target/spring-boot-mongo.jar
+```
+
+This approach works, but the final image also contains Maven, JDK build tools, source code, and other files that are not required to run the application.
+
+---
+
+# 2. Multi-Stage Docker Build
+
+For production, we normally separate the **build environment** and **runtime environment**.
+
+Example:
+
+```dockerfile
+# Stage 1 - Build
+FROM maven:3.9-eclipse-temurin-8 AS build
+
+WORKDIR /app
+
+COPY . .
+
+RUN mvn clean package -DskipTests
+
+
+# Stage 2 - Runtime
+FROM eclipse-temurin:8u502-b07-jre-ubi10-minimal
+
+WORKDIR /app
+
+COPY --from=build /app/target/*.jar /app/spring-boot-mongo.jar
+
+EXPOSE 8080
+
+CMD ["java", "-jar", "spring-boot-mongo.jar"]
+```
+
+The main idea is:
+
+```text
+Stage 1
+Maven + JDK
+     |
+     | Build application
+     ↓
+   JAR file
+     |
+     | COPY --from=build
+     ↓
+Stage 2
+JRE + JAR
+```
+
+---
+
+# 3. Is the First Stage Carried Into the Second Stage?
+
+**No.**
+
+This is one of the most important things to remember about multi-stage builds.
+
+Every `FROM` starts a new stage from a new base image.
+
+For example:
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-8 AS build
+```
+
+creates the first stage.
+
+Then:
+
+```dockerfile
+FROM eclipse-temurin:8u502-b07-jre-ubi10-minimal
+```
+
+starts a completely new stage.
+
+The second stage does **not automatically contain**:
+
+* Maven
+* JDK
+* source code
+* `pom.xml`
+* Maven cache
+* files created in Stage 1
+
+Only the files that we explicitly copy from Stage 1 are transferred.
+
+In our case:
+
+```dockerfile
+COPY --from=build /app/target/*.jar /app/spring-boot-mongo.jar
+```
+
+means:
+
+> Take the generated JAR from the `build` stage and copy it into the runtime stage.
+
+So the final image contains approximately:
+
+```text
+JRE
++
+spring-boot-mongo.jar
+```
+
+and not the complete Maven build environment.
+
+---
+
+# 4. Why Do We Use Two Stages?
+
+The application needs Maven and JDK **while building**:
+
+```text
+Source Code
+    |
+    ↓
+Maven + JDK
+    |
+    ↓
+Application JAR
+```
+
+But after the JAR is created, the application only needs Java runtime:
+
+```text
+JAR
+ |
+ ↓
+JRE
+ |
+ ↓
+Running Application
+```
+
+Therefore, we don't need Maven and the JDK compiler in the production container.
+
+Advantages of multi-stage builds:
+
+* Smaller runtime image
+* Less unnecessary software
+* Reduced attack surface
+* Cleaner production image
+* Build tools are separated from runtime
+* Easier to maintain production containers
+
+---
+
+# 5. `RUN` vs `CMD`
+
+Another important concept is the difference between `RUN` and `CMD`.
+
+### RUN
+
+`RUN` executes during **Docker image build**.
+
+For example:
+
+```dockerfile
+RUN mvn clean package
+```
+
+It happens when we execute:
+
+```bash
+docker build -t myapp .
+```
+
+Its purpose is to create something inside the image, such as the application JAR.
+
+### CMD
+
+`CMD` executes when the **container starts**.
+
+For example:
+
+```dockerfile
+CMD ["java", "-jar", "spring-boot-mongo.jar"]
+```
+
+It happens when we execute:
+
+```bash
+docker run myapp
+```
+
+So:
+
+```text
+docker build
+     |
+     └── RUN mvn clean package
+                |
+                ↓
+              IMAGE
+                |
+                |
+docker run
+     |
+     └── CMD java -jar ...
+                |
+                ↓
+            CONTAINER
+```
+
+---
+
+# 6. Why `mvnw` Was Not Available in the Java Image
+
+Initially I used:
+
+```dockerfile
+FROM eclipse-temurin:8u502-b07-jdk-ubi10-minimal
+```
+
+and tried:
+
+```dockerfile
+RUN ./mvnw clean package
+```
+
+The important point is that `mvnw` is **not provided by the Java/JDK base image**.
+
+`mvnw` is the Maven Wrapper belonging to the application project.
+
+A project using Maven Wrapper normally contains:
+
+```text
+project/
+├── pom.xml
+├── mvnw
+├── mvnw.cmd
+├── .mvn/
+└── src/
+```
+
+Therefore, if `mvnw` is not present in the project, this will fail:
+
+```bash
+./mvnw clean package
+```
+
+Using:
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-8
+```
+
+is simpler because Maven is already installed in that image.
+
+---
+
+# 7. `COPY --from` Concept
+
+The important syntax is:
+
+```dockerfile
+COPY --from=build SOURCE DESTINATION
+```
+
+For example:
+
+```dockerfile
+COPY --from=build /app/target/*.jar /app/spring-boot-mongo.jar
+```
+
+Here:
+
+```text
+--from=build
+```
+
+means:
+
+> Copy from the Docker build stage named `build`.
+
+This name comes from:
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-8 AS build
+```
+
+We can also use:
+
+```dockerfile
+COPY --from=0 ...
+```
+
+because `0` represents the first stage.
+
+However, using a name like:
+
+```text
+--from=build
+```
+
+is easier to understand and maintain.
+
+---
+
+# 8. Final Mental Model
+
+The easiest way to remember multi-stage Docker builds is:
+
+> **Build with one image, run with another image, and explicitly copy only the required artifact between them.**
+
+For our Spring Boot application:
+
+```text
+              BUILD STAGE
+        Maven + JDK + Source
+                  |
+                  |
+            mvn clean package
+                  |
+                  ↓
+            application.jar
+                  |
+                  | COPY --from=build
+                  ↓
+             RUNTIME STAGE
+                  |
+                 JRE
+                  +
+          application.jar
+                  |
+                  ↓
+          java -jar app.jar
+                  |
+                  ↓
+             Application
+```
+
+So:
+
+```text
+Stage 1 = Build the application
+Stage 2 = Run the application
+```
+
+The first stage is **not carried into the second stage**. Only the files we explicitly copy are brought across.
+
+For production, the multi-stage approach is generally preferred because the final container contains only what is required to run the application.
+
+This should work well as a **2-page-ish README reference** and also as interview revision notes.
+
+
+
+
+
+
+
+│ java -jar app.jar       │
+└─────────────────────────┘
